@@ -9,7 +9,7 @@
 | Система | Архив | Запуск |
 | --- | --- | --- |
 | macOS 14+ на Apple Silicon или Intel | `SpeechTraining-macos-universal.zip` | Распакуй и открой `SpeechTraining.app`. |
-| Windows 10 (2004+) или Windows 11, x64 | `SpeechTraining-windows-x64.zip` | Распакуй всю папку и открой `SpeechTraining.exe`. Среда .NET входит в архив. |
+| Windows 11, x64 | `SpeechTraining-windows-x64.zip` | Распакуй всю папку и открой `SpeechTraining.exe`. Среда .NET входит в архив. |
 
 Сборка macOS подписана локальной подписью без нотарификации Apple. Windows-сборка распространяется без сертификата издателя, поэтому система может показать предупреждение при первом запуске.
 

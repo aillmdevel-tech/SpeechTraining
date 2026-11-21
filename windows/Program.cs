@@ -40,6 +40,11 @@ internal static class Program
             if (pcm.Take(160).Any(sample => sample != 8191) || pcm[160] != 0) return 5;
             using var form = new MainForm(storage, hotkeysEnabled: false);
             if (form.Handle == IntPtr.Zero || form.Text != "SpeechTraining") return 6;
+            form.Show();
+            form.ToggleWindow();
+            if (form.Visible) return 7;
+            form.ToggleWindow();
+            if (!form.Visible) return 8;
             return 0;
         }
         catch { return 1; }

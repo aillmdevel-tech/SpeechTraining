@@ -291,7 +291,7 @@ internal sealed class MainForm : Form
                     checking = null;
                     turns.Update(message.Text);
                     var suggestion = turns.Candidate;
-                    if (!interrupted && suggestion?.Spoken == turns.CheckedSpoken) suggestion = null;
+                    if (!interrupted && suggestion == turns.Checked) suggestion = null;
                     Commit(turns.Finish(message.Text), suggestion);
                     draft.Text = "";
                     break;
@@ -305,10 +305,10 @@ internal sealed class MainForm : Form
 
     private async Task CheckBoundary(CancellationToken cancellation)
     {
-        if (checking is not null || turns.Candidate is not { } candidate || turns.CheckedSpoken == candidate.Spoken) return;
+        if (checking is not null || turns.Candidate is not { } candidate || turns.Checked?.Spoken == candidate.Spoken) return;
         using var request = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
         checking = request;
-        turns.CheckedSpoken = candidate.Spoken;
+        turns.Checked = candidate;
         var separate = await gateway.IsNewTopic(candidate, request.Token);
         if (!ReferenceEquals(checking, request)) return;
         checking = null;

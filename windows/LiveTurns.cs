@@ -7,7 +7,7 @@ internal sealed partial class LiveTurns
     private int consumed;
     private string[] parts = [];
     public string Draft => string.Join(" ", parts.Skip(consumed));
-    public string? CheckedSpoken { get; set; }
+    public Boundary? Checked { get; set; }
 
     public void Update(string value)
     {
@@ -34,7 +34,7 @@ internal sealed partial class LiveTurns
     {
         if (Candidate?.Spoken != value.Spoken) return null;
         consumed += SentenceSeparator().Split(value.Spoken).Length;
-        CheckedSpoken = null;
+        Checked = null;
         return value.Spoken;
     }
 
@@ -44,7 +44,7 @@ internal sealed partial class LiveTurns
         var result = Draft;
         parts = [];
         consumed = 0;
-        CheckedSpoken = null;
+        Checked = null;
         return result;
     }
 

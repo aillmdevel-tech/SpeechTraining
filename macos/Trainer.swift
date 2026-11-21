@@ -214,7 +214,7 @@ final class TrainerModel: ObservableObject {
             boundaryCheck = nil
             turns.update(text)
             let unresolved = turns.candidate.flatMap { candidate in
-                interruptedCheck || turns.alreadyChecked?.spoken != candidate.spoken ? candidate : nil
+                interruptedCheck || turns.alreadyChecked != candidate ? candidate : nil
             }
             let finished = turns.finish(text)
             liveDraft = ""

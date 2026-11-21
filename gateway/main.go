@@ -264,7 +264,7 @@ func answer(ctx context.Context, key string, request coachRequest) (json.RawMess
 }
 
 func boundary(ctx context.Context, key string, text []byte) (json.RawMessage, error) {
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	instruction := "Decide whether opening is the beginning of a new, independent request, question or topic after spoken. " +
 		"Set separate true if spoken makes sense on its own and opening switches to an independent request or topic. " +
