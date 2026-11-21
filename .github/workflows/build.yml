@@ -1,0 +1,49 @@
+name: Desktop builds
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.1.0
+        with:
+          go-version-file: gateway/go.mod
+          cache: false
+      - name: Build universal macOS app
+        run: ./scripts/build-macos.sh
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: SpeechTraining-macos-universal
+          path: dist/SpeechTraining-macos-universal.zip
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.1.0
+        with:
+          go-version-file: gateway/go.mod
+          cache: false
+      - uses: actions/setup-dotnet@v6.1.0
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build and test Windows x64 app
+        shell: pwsh
+        run: ./scripts/build-windows.ps1
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: SpeechTraining-windows-x64
+          path: dist/SpeechTraining-windows-x64.zip
+          if-no-files-found: error
