@@ -64,9 +64,14 @@ final class WindowControls: ObservableObject {
         self.listen = listen
         guard localMonitor == nil else { return }
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            MainActor.assumeIsolated {
-                self?.handleLocalKey(event) == true ? nil : event
+            let windowNumber = event.windowNumber
+            let plain = event.modifierFlags.intersection([.control, .option, .shift, .command]).isEmpty
+            let grave = Int(event.keyCode) == kVK_ANSI_Grave || event.charactersIgnoringModifiers == "`"
+            let repeated = event.isARepeat
+            let consumed = MainActor.assumeIsolated {
+                self?.handleLocalKey(windowNumber: windowNumber, plain: plain, grave: grave, repeated: repeated) == true
             }
+            return consumed ? nil : event
         }
         let events = [
             EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)),
@@ -108,12 +113,10 @@ final class WindowControls: ObservableObject {
         return nil
     }
 
-    private func handleLocalKey(_ event: NSEvent) -> Bool {
-        guard let window, event.window === window,
-              event.modifierFlags.intersection([.control, .option, .shift, .command]).isEmpty,
-              Int(event.keyCode) == kVK_ANSI_Grave || event.charactersIgnoringModifiers == "`",
+    private func handleLocalKey(windowNumber: Int, plain: Bool, grave: Bool, repeated: Bool) -> Bool {
+        guard let window, windowNumber == window.windowNumber, plain, grave,
               (window.firstResponder as? NSTextView)?.isEditable != true else { return false }
-        if !event.isARepeat { listen?() }
+        if !repeated { listen?() }
         return true
     }
 

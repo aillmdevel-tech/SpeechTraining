@@ -12,7 +12,6 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="NAudio.Wasapi" Version="2.2.1" />
-    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
     <None Include="../shared/CoachPrompt.txt" Link="CoachPrompt.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Update="NAudio-LICENSE.txt" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
