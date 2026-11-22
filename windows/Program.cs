@@ -27,10 +27,7 @@ internal static class Program
             var fixture = new ChatTurn(Guid.NewGuid(), "Question", "answer", [new("Answer", "Перевод")]);
             storage.WriteHistory([fixture]);
             if (storage.ReadHistory().Single().Reply.Single().Ru != "Перевод") return 3;
-            var turns = new LiveTurns();
-            turns.Update("How would you help a new student? What would you change about climate policy?");
-            if (turns.Candidate is not { } boundary || turns.SplitAt(boundary) != boundary.Spoken ||
-                turns.Finish($"{boundary.Spoken} {boundary.Opening}") != boundary.Opening) return 4;
+            if (!CheckQuestionThreads(storage, fixture.Id)) return 4;
             var track = new AudioTrack();
             var audio = new byte[480 * 2 * 2];
             for (var sample = 0; sample < audio.Length; sample += 2)
@@ -49,5 +46,32 @@ internal static class Program
         }
         catch { return 1; }
         finally { if (Directory.Exists(path)) Directory.Delete(path, recursive: true); }
+    }
+
+    private static bool CheckQuestionThreads(Storage storage, Guid legacy)
+    {
+        var book = new QuestionBook(storage.ReadThreads());
+        if (book.Find(legacy)?.Title != "Question" || book.Active is not null) return false;
+        var english = new AnswerChoice("en", "short");
+        var russian = new AnswerChoice("ru", "short");
+        var first = new ThreadItem(new("Fair school budget?", "Справедливый школьный бюджет?"), [new("Choose a criterion.", "Выбери критерий.")]);
+        var second = new ThreadItem(new("Help a new student?", "Помочь новому ученику?"), [new("Offer a guide.", "Предложи помощь.")]);
+        var original = book.Navigation;
+        book.Add(first, null, original, "answer", english, true);
+        if (book.Active is not { } thread) return false;
+        book.Select(null);
+        book.Add(second, null, original, "answer", english, true);
+        if (book.Active is not null || book.Threads.Count != 3 || book.Context(null, null).Length != 0) return false;
+        book.Select(thread.Id);
+        if (book.Context(thread.Id, null).Single().Question != first.Question.Text) return false;
+        var followUp = new ThreadItem(new("What criterion?", "Какой критерий?"), [new("Choose reach.", "Выбери охват.")]);
+        book.Add(followUp, thread.Id, book.Navigation, "answer", english, true);
+        var last = thread.Turns.Last();
+        book.ShowVariant(thread.Id, last.Id, russian, new AnswerVariant(russian, followUp.Question, [new("Выбери охват.", "")]));
+        if (thread.Turns.Last().Answer?.Choice != russian || book.Context(thread.Id, last.Id).Length != 1) return false;
+        book.ShowVariant(thread.Id, last.Id, english, null);
+        storage.WriteThreads(book.Snapshot());
+        var restored = new QuestionBook(storage.ReadThreads());
+        return restored.Active?.Turns.Last().Answer?.Choice == english && restored.Threads.Count == 3;
     }
 }

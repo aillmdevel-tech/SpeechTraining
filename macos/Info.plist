@@ -2,25 +2,25 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleIdentifier</key>
-    <string>tech.aillmdevel.speechtraining</string>
-    <key>CFBundleExecutable</key>
-    <string>SpeechTraining</string>
-    <key>CFBundleName</key>
-    <string>SpeechTraining</string>
-    <key>CFBundleDisplayName</key>
-    <string>SpeechTraining</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.3.0</string>
-    <key>CFBundleVersion</key>
-    <string>4</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>Микрофон нужен, чтобы распознавать речь и показывать её в чате во время тренировки.</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
+	<key>CFBundleDisplayName</key>
+	<string>SpeechTraining</string>
+	<key>CFBundleExecutable</key>
+	<string>SpeechTraining</string>
+	<key>CFBundleIdentifier</key>
+	<string>tech.aillmdevel.speechtraining</string>
+	<key>CFBundleName</key>
+	<string>SpeechTraining</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.4.0</string>
+	<key>CFBundleVersion</key>
+	<string>5</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Микрофон нужен, чтобы распознавать речь и показывать её в чате во время тренировки.</string>
 </dict>
 </plist>

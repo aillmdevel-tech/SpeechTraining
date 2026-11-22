@@ -48,26 +48,8 @@ internal sealed class Gateway : IDisposable
         finally { startup.Release(); }
     }
 
-    public async Task<bool> IsNewTopic(Boundary value, CancellationToken token)
-    {
-        try
-        {
-            value = new(value.Spoken.Length > 1500 ? value.Spoken[^1500..] : value.Spoken,
-                        value.Opening.Length > 650 ? value.Opening[..650] : value.Opening);
-            return (await Post<Boundary, BoundaryDecision>("/boundary", value, token)).Separate;
-        }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or InvalidOperationException or JsonException)
-        {
-            return false;
-        }
-    }
-
-    public async Task<Segment[]> Answer(CoachRequest request, CancellationToken token)
-    {
-        var result = await Post<CoachRequest, CoachReply>("/answer", request, token);
-        return result.Segments.Where(s => !string.IsNullOrWhiteSpace(s.Text))
-            .Select(s => request.Translate ? s : s with { Ru = "" }).ToArray();
-    }
+    public Task<ThreadReply> Answer(ThreadRequest request, CancellationToken token) =>
+        Post<ThreadRequest, ThreadReply>("/thread", request, token);
 
     private async Task<TOut> Post<TIn, TOut>(string path, TIn input, CancellationToken token)
     {

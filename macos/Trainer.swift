@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 import SwiftUI
 
-enum ReplyLanguage: String, CaseIterable, Identifiable {
+enum ReplyLanguage: String, CaseIterable, Identifiable, Codable {
     case ru, uk, en
     var id: String { rawValue }
     var label: String {
@@ -14,7 +14,7 @@ enum ReplyLanguage: String, CaseIterable, Identifiable {
     }
 }
 
-enum ReplyLength: String, CaseIterable, Identifiable {
+enum ReplyLength: String, CaseIterable, Identifiable, Codable {
     case short, medium, long
     var id: String { rawValue }
     var label: String {
@@ -50,56 +50,209 @@ struct Segment: Codable {
     let ru: String
 }
 
-struct CoachReply: Decodable {
-    let segments: [Segment]
-}
-
 @MainActor
 final class TrainerModel: ObservableObject {
-    private var persistPreferences = true
-    @Published var language: ReplyLanguage = ReplyLanguage(rawValue: UserDefaults.standard.string(forKey: "language") ?? "") ?? .ru {
+    private struct Request {
+        let input: String
+        let target: UUID?
+        let navigation: UUID
+        let mode: TrainerMode
+        let choice: AnswerChoice
+        let source: String
+        var session: UUID? = nil
+        var rewrite: QuestionTurn? = nil
+    }
+
+    private let persistPreferences: Bool
+    @Published var language = ReplyLanguage(rawValue: UserDefaults.standard.string(forKey: "language") ?? "") ?? .ru {
         didSet { if persistPreferences { UserDefaults.standard.set(language.rawValue, forKey: "language") } }
     }
-    @Published var length: ReplyLength = ReplyLength(rawValue: UserDefaults.standard.string(forKey: "length") ?? "") ?? .short {
+    @Published var length = ReplyLength(rawValue: UserDefaults.standard.string(forKey: "length") ?? "") ?? .short {
         didSet { if persistPreferences { UserDefaults.standard.set(length.rawValue, forKey: "length") } }
     }
     @Published var mode: TrainerMode = .answer
     @Published var translate = true
     @Published var mic = true
     @Published var system = false
+    @Published var voiceFollowUp = false
     @Published var input = ""
-    @Published var segments: [Segment] = []
-    @Published private(set) var responseMode: TrainerMode?
     @Published var recording = false
     @Published var busy = false
-    @Published private(set) var liveChat: [LiveChatItem] = []
-    @Published private(set) var liveDraft = ""
-    @Published private(set) var livePending = 0
-    @Published private(set) var finishingTurns = 0
     @Published var status = ""
-    @Published var error = ""
-    private let capture = VoiceCapture()
+    @Published private(set) var error = ""
+    @Published private(set) var history: ThreadHistory
+    @Published private(set) var pending = 0
+    @Published private(set) var revision = 0
+    @Published private(set) var rewriting = Set<UUID>()
+    @Published private(set) var retryAvailable = false
     let gateway: Gateway
+
+    private let capture = VoiceCapture()
     private var speech: LiveSpeech?
     private var sender: Task<Void, Never>?
     private var receiver: Task<Void, Never>?
-    private var boundaryCheck: Task<Void, Never>?
-    private var commitTask: Task<Void, Never>?
     private var replyTask: Task<Void, Never>?
-    private var turns = LiveTurns()
-    private var conversation = UUID()
     private var speechGeneration = UUID()
-    private var lastQuestion = ""
-    var isReplying: Bool { livePending > 0 || finishingTurns > 0 }
-    var canToggleCapture: Bool { !busy && (recording || (!isReplying && (mic || system))) }
-    var canSend: Bool { !busy && !recording && !isReplying && (mode == .practice || !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
+    private var navigation = UUID()
+    private var drafts: [UUID?: String] = [:]
+    private var failed: Request?
+    private var incomplete: (text: String, session: UUID, target: UUID?, navigation: UUID, time: Date)?
+
+    var activeThread: QuestionThread? { history.threads.first { $0.id == history.activeID } }
+    var archived: [QuestionThread] { history.threads.reversed().filter { $0.id != history.activeID } }
+    var hasActive: Bool { activeThread != nil }
+    var canClose: Bool { history.activeID != nil }
+    var isReplying: Bool { pending > 0 }
+    var canToggleCapture: Bool { !busy && (recording || mic || system) }
+    var canSend: Bool { !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || mode == .practice }
+    var canRewrite: Bool {
+        guard let turn = activeThread?.turns.last else { return false }
+        return !rewriting.contains(turn.id) && turn.displayed != choice
+    }
+    private var choice: AnswerChoice { AnswerChoice(language: language, length: length) }
 
     init(persistPreferences: Bool = true, store: LocalStore = LocalStore(), restoreHistory: Bool = true) {
         self.persistPreferences = persistPreferences
         gateway = Gateway(store: store)
-        if restoreHistory { liveChat = store.history }
+        history = restoreHistory ? store.history : ThreadHistory()
     }
 
+    func closeQuestion() {
+        select(nil)
+    }
+
+    func select(_ id: UUID?) {
+        drafts[history.activeID] = input
+        navigation = UUID()
+        history.activeID = id
+        input = drafts[id] ?? ""
+        voiceFollowUp = false
+        persistHistory()
+    }
+
+    func send() {
+        guard canSend else { return }
+        let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        input = ""
+        if text.isEmpty && mode == .practice { select(nil) }
+        if history.activeID == nil {
+            history.activeID = UUID()
+            navigation = UUID()
+        }
+        enqueue(Request(input: text.isEmpty ? "Задай новый вопрос для репетиции UWC." : text,
+                        target: history.activeID, navigation: navigation, mode: mode, choice: choice, source: "typed"))
+    }
+
+    func rewriteAnswer() {
+        guard canRewrite, let thread = activeThread, let turn = thread.turns.last, let answer = turn.answer else { return }
+        if turn.variants.contains(where: { $0.choice == choice }) {
+            updateVariant(in: thread.id, turn: turn.id, variant: nil, choice: choice)
+            return
+        }
+        rewriting.insert(turn.id)
+        enqueue(Request(input: answer.question.text, target: thread.id, navigation: navigation,
+                        mode: turn.mode, choice: choice, source: "rewrite", rewrite: turn))
+    }
+
+    func retry() {
+        guard let request = failed else { return }
+        if let rewrite = request.rewrite { rewriting.insert(rewrite.id) }
+        enqueue(request)
+    }
+
+    private func enqueue(_ request: Request) {
+        failed = nil
+        retryAvailable = false
+        error = ""
+        pending += 1
+        replyTask = Task { [weak self, prior = replyTask] in
+            await prior?.value
+            guard let self else { return }
+            defer {
+                self.pending -= 1
+                if let turn = request.rewrite { self.rewriting.remove(turn.id) }
+            }
+            do {
+                try await self.deliver(request)
+            } catch {
+                self.error = error.localizedDescription
+                self.failed = request
+                self.retryAvailable = true
+            }
+        }
+    }
+
+    private func deliver(_ request: Request) async throws {
+        try await gateway.ensureReady()
+        let thread = history.threads.first { $0.id == request.target }
+        var prior = thread?.turns ?? []
+        if let rewrite = request.rewrite, let position = prior.firstIndex(where: { $0.id == rewrite.id }) {
+            prior = Array(prior.prefix(position))
+        }
+        if prior.count > 5 { prior = Array(prior.prefix(1)) + Array(prior.suffix(4)) }
+        let context = prior.compactMap { turn -> PriorReply? in
+            guard let reply = turn.answer else { return nil }
+            return PriorReply(question: reply.question.text,
+                              answer: reply.segments.map(\.text).joined(separator: " "))
+        }
+        let previous = request.rewrite?.answer?.segments.map(\.text).joined(separator: " ") ?? ""
+        var carry = ""
+        if request.source == "voice", let incomplete, incomplete.session == request.session,
+           incomplete.target == request.target, incomplete.navigation == request.navigation,
+           Date().timeIntervalSince(incomplete.time) < 15 {
+            carry = incomplete.text
+        }
+        let result = try await gateway.answer(input: request.input, mode: request.mode, choice: request.choice,
+                                              source: request.source, history: context,
+                                              previous: previous, continuation: carry)
+        if request.source == "voice", let session = request.session {
+            incomplete = result.incomplete
+                ? (String([carry, request.input].joined(separator: " ").suffix(1200)),
+                   session, request.target, request.navigation, Date())
+                : nil
+        }
+        if let rewrite = request.rewrite, let target = request.target, let item = result.items.first {
+            let question = request.mode == .practice ? item.question : rewrite.answer?.question ?? item.question
+            let variant = AnswerVariant(choice: request.choice, question: question, segments: item.segments)
+            updateVariant(in: target, turn: rewrite.id, variant: variant, choice: request.choice)
+            return
+        }
+        for item in result.items {
+            let active = request.target ?? UUID()
+            let answer = AnswerVariant(choice: request.choice, question: item.question, segments: item.segments)
+            let turn = QuestionTurn(mode: request.mode, variants: [answer], displayed: request.choice)
+            if let index = history.threads.firstIndex(where: { $0.id == active }) {
+                history.threads[index].turns.append(turn)
+            } else {
+                history.threads.append(QuestionThread(id: active, turns: [turn]))
+            }
+            if request.target == nil && request.navigation == navigation && input.isEmpty && !voiceFollowUp {
+                history.activeID = active
+            }
+        }
+        if !result.items.isEmpty {
+            revision += 1
+            persistHistory()
+        }
+    }
+
+    private func updateVariant(in thread: UUID, turn: UUID, variant: AnswerVariant?, choice: AnswerChoice) {
+        guard let index = history.threads.firstIndex(where: { $0.id == thread }),
+              let position = history.threads[index].turns.firstIndex(where: { $0.id == turn }) else { return }
+        if let variant { history.threads[index].turns[position].variants.append(variant) }
+        history.threads[index].turns[position].displayed = choice
+        revision += 1
+        persistHistory()
+    }
+
+    private func persistHistory() {
+        do { try gateway.store.saveHistory(history) }
+        catch { self.error = "Не удалось сохранить локальную историю." }
+    }
+
+    func finishLiveTest() async {
+        await replyTask?.value
+    }
     func toggleCapture() {
         guard canToggleCapture else { return }
         if recording {
@@ -173,26 +326,17 @@ final class TrainerModel: ObservableObject {
 
     func startLiveChat() {
         speechGeneration = UUID()
-        turns = LiveTurns()
-        liveDraft = ""
     }
 
     private func stopListening(error: String = "") {
         speechGeneration = UUID()
         sender?.cancel()
         receiver?.cancel()
-        boundaryCheck?.cancel()
-        boundaryCheck = nil
         speech?.close()
         speech = nil
         recording = false
         status = ""
         self.error = error
-        if !liveDraft.isEmpty {
-            input = [input, liveDraft].filter { !$0.isEmpty }.joined(separator: "\n")
-        }
-        liveDraft = ""
-        turns = LiveTurns()
         busy = true
         Task {
             await capture.stop()
@@ -203,140 +347,19 @@ final class TrainerModel: ObservableObject {
     func ingestSpeech(_ event: SpeechEvent) throws {
         switch event.message_type {
         case "partial_transcript":
-            guard let text = event.text, !text.isEmpty else { return }
-            turns.update(text)
-            liveDraft = turns.draft
-            checkBoundary()
+            if event.text?.isEmpty == false && recording { status = "Слышу речь…" }
         case "committed_transcript":
-            guard let text = event.text, !text.isEmpty else { return }
-            let interruptedCheck = boundaryCheck != nil
-            boundaryCheck?.cancel()
-            boundaryCheck = nil
-            turns.update(text)
-            let unresolved = turns.candidate.flatMap { candidate in
-                interruptedCheck || turns.alreadyChecked != candidate ? candidate : nil
-            }
-            let finished = turns.finish(text)
-            liveDraft = ""
-            commitSpeech(finished, at: unresolved)
+            if recording { status = "Слушаю…" }
+            guard let text = event.text, text.contains(where: \.isLetter) else { return }
+            let isExercise = mode == .practice && activeThread?.turns.first?.mode == .practice
+            let target = voiceFollowUp || isExercise ? history.activeID : nil
+            enqueue(Request(input: text, target: target, navigation: navigation,
+                            mode: mode == .practice ? .review : mode, choice: choice,
+                            source: "voice", session: speechGeneration))
         case "session_started", "warning", "committed_transcript_with_timestamps":
             return
-        default: throw LiveSpeech.problem(event.message_type)
-        }
-    }
-
-    private func checkBoundary() {
-        guard boundaryCheck == nil, let candidate = turns.candidate,
-              candidate.spoken != turns.alreadyChecked?.spoken else { return }
-        turns.checked(candidate)
-        let session = speechGeneration
-        boundaryCheck = Task { [weak self] in
-            guard let self else { return }
-            let separate = await self.gateway.isNewTopic(candidate)
-            guard !Task.isCancelled, self.speechGeneration == session else { return }
-            self.boundaryCheck = nil
-            if separate, let finished = self.turns.split(at: candidate) {
-                self.commitSpeech(finished)
-                self.liveDraft = self.turns.draft
-            }
-        }
-    }
-
-    private func commitSpeech(_ text: String, at boundary: TurnBoundary? = nil) {
-        guard !text.isEmpty else { return }
-        if boundary == nil && finishingTurns == 0 {
-            queueSpeech(text)
-            return
-        }
-        finishingTurns += 1
-        commitTask = Task { [weak self, prior = commitTask] in
-            await prior?.value
-            guard let self else { return }
-            defer { self.finishingTurns -= 1 }
-            if let boundary, await self.gateway.isNewTopic(boundary) {
-                self.queueSpeech(boundary.spoken)
-                self.queueSpeech(boundary.opening)
-            } else {
-                self.queueSpeech(text)
-            }
-        }
-    }
-
-    private func queueSpeech(_ text: String) {
-        guard text.contains(where: \.isLetter) else { return }
-        let mode: TrainerMode = self.mode == .practice ? .review : self.mode
-        let language = self.language
-        let length = self.length
-        let translate = self.translate
-        let item = LiveChatItem(text: text, mode: mode)
-        liveChat.append(item)
-        persistHistory()
-        livePending += 1
-        replyTask = Task { [weak self, prior = replyTask] in
-            await prior?.value
-            guard let self else { return }
-            defer { self.livePending -= 1 }
-            do {
-                let prompt = mode == .review && !self.lastQuestion.isEmpty
-                    ? "Последний тренировочный вопрос: \(self.lastQuestion)\n\nТекст кандидата: \(text)" : text
-                let segments = try await self.gateway.answer(input: prompt, mode: mode, language: language, length: length, translate: translate)
-                self.showReply(segments, on: item.id)
-            } catch {
-                self.error = error.localizedDescription
-            }
-        }
-    }
-
-    private func showReply(_ segments: [Segment], on item: UUID) {
-        if let index = liveChat.firstIndex(where: { $0.id == item }) {
-            liveChat[index].segments = segments
-            persistHistory()
-        }
-    }
-
-    private func persistHistory() {
-        do { try gateway.store.saveHistory(liveChat) }
-        catch { self.error = "Не удалось сохранить локальную историю." }
-    }
-
-    func finishLiveTest() async {
-        await commitTask?.value
-        await replyTask?.value
-    }
-
-    func send() {
-        guard canSend else { return }
-        error = ""
-        let typed = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        let visible = typed.isEmpty ? "Следующий тренировочный вопрос" : typed
-        let request: String
-        if mode == .review && !lastQuestion.isEmpty {
-            request = "Последний тренировочный вопрос: \(lastQuestion)\n\nТекст кандидата: \(visible)"
-        } else if mode == .practice && !lastQuestion.isEmpty {
-            request = visible + "\nПредыдущий вопрос, который не нужно повторять: \(lastQuestion)"
-        } else {
-            request = visible
-        }
-        busy = true
-        status = "Готовлю ответ…"
-        let selection = (mode, language, length, translate)
-        let item = LiveChatItem(text: visible, mode: selection.0)
-        liveChat.append(item)
-        persistHistory()
-        Task {
-            defer { busy = false }
-            do {
-                try await gateway.ensureReady()
-                let answer = try await gateway.answer(input: request, mode: selection.0, language: selection.1, length: selection.2, translate: selection.3)
-                segments = answer
-                showReply(answer, on: item.id)
-                responseMode = selection.0
-                if selection.0 == .practice { lastQuestion = answer.map(\.text).joined(separator: " ") }
-                status = "Ответ готов"
-            } catch {
-                status = ""
-                self.error = error.localizedDescription
-            }
+        default:
+            throw LiveSpeech.problem(event.message_type)
         }
     }
 }

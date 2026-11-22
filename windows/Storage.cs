@@ -10,11 +10,6 @@ internal record Settings(string Gemini = "", string Elevenlabs = "", string Prof
 
 internal record Segment(string Text, string Ru);
 internal record ChatTurn(Guid Id, string Input, string Mode, Segment[] Reply);
-internal record CoachReply(Segment[] Segments);
-internal record CoachRequest(string Prompt, string Input, string Mode, string Language, string Length, bool Translate);
-internal record Boundary(string Spoken, string Opening);
-internal record BoundaryDecision(bool Separate);
-
 internal sealed class Storage(string root)
 {
     public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
@@ -43,6 +38,25 @@ internal sealed class Storage(string root)
 
     public void WriteHistory(IEnumerable<ChatTurn> turns) =>
         Write("history.json", JsonSerializer.SerializeToUtf8Bytes(turns.TakeLast(200), Json));
+
+    public ThreadHistory ReadThreads()
+    {
+        var path = Path.Combine(root, "threads.json");
+        if (File.Exists(path)) return JsonSerializer.Deserialize<ThreadHistory>(File.ReadAllBytes(path), Json) ?? new([], null);
+        var migrated = ReadHistory().Select(old =>
+        {
+            var phrase = string.Join(" ", old.Reply.Select(line => line.Text));
+            var language = phrase.Any(character => "іїєґІЇЄҐ".Contains(character)) ? "uk" :
+                phrase.All(character => character < '\u0400' || character > '\u04FF') ? "en" : "ru";
+            var choice = new AnswerChoice(language, "short");
+            var variant = new AnswerVariant(choice, new Segment(old.Input, ""), old.Reply);
+            return new QuestionThread(old.Id, [new QuestionTurn(Guid.NewGuid(), old.Mode, [variant], choice)]);
+        }).ToList();
+        return new(migrated, null);
+    }
+
+    public void WriteThreads(ThreadHistory history) =>
+        Write("threads.json", JsonSerializer.SerializeToUtf8Bytes(history, Json));
 
     private void Write(string name, byte[] bytes)
     {

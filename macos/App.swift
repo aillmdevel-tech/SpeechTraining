@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import NaturalLanguage
 import SwiftUI
 
 @MainActor
@@ -26,276 +27,261 @@ struct TrainerView: View {
     @ObservedObject var model: TrainerModel
     @ObservedObject var windowControls: WindowControls
     @State private var settingsShown = false
+    @State private var historyShown = false
     private let accent = Color(red: 0.15, green: 0.37, blue: 0.63)
 
     var body: some View {
-        VSplitView {
-            composer.frame(minHeight: model.recording ? 214 : 312, idealHeight: model.recording ? 230 : 345,
-                           maxHeight: model.recording ? 275 : 390)
-            response
-                .frame(minHeight: 170, maxHeight: .infinity)
+        VStack(spacing: 0) {
+            controls
+            Divider()
+            threadBar
+            threadContent
+            Divider()
+            composer
         }
-        .frame(minWidth: 520, idealWidth: 720, minHeight: 530, idealHeight: 680)
+        .frame(minWidth: 520, idealWidth: 720, minHeight: 555, idealHeight: 700)
         .background(Color(nsColor: .windowBackgroundColor))
         .tint(accent)
         .sheet(isPresented: $settingsShown) { SettingsView(gateway: model.gateway) }
     }
 
-    private var composer: some View {
-        VStack(alignment: .leading, spacing: 13) {
-            HStack {
-                Text("SpeechTraining")
-                    .font(.system(size: 24, weight: .semibold))
-                    .accessibilityAddTraits(.isHeader)
+    private var controls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 14) {
+                Text("Тренировка UWC").font(.system(size: 22, weight: .semibold))
                 Spacer()
-                Button("Настройки") { settingsShown = true }
-                    .disabled(model.busy || model.recording || model.isReplying)
-                Toggle("Ghost", isOn: $windowControls.ghost)
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
+                Toggle("Ghost", isOn: $windowControls.ghost).toggleStyle(.switch).controlSize(.small)
                     .help("Ограничить захват окна там, где это поддерживает macOS")
+                Button { settingsShown = true } label: { Image(systemName: "gearshape") }
+                    .accessibilityLabel("Настройки")
+                    .help("Настройки")
+                    .disabled(model.busy || model.recording || model.isReplying)
             }
 
-            VStack(spacing: 8) {
-                control("Режим") {
-                    Picker("Режим", selection: $model.mode) {
-                        ForEach(TrainerMode.allCases) { item in Text(item.label).tag(item) }
-                    }
-                    .labelsHidden()
+            control("Режим") {
+                Picker("Режим", selection: $model.mode) {
+                    ForEach(TrainerMode.allCases) { item in Text(item.label).tag(item) }
                 }
-                control("Длина") {
-                    Picker("Длина", selection: $model.length) {
-                        ForEach(ReplyLength.allCases) { item in Text(item.label).tag(item) }
-                    }
-                    .labelsHidden()
-                    .disabled(model.mode == .practice)
-                }
-                control("Язык") {
-                    Picker("Язык ответа", selection: $model.language) {
-                        ForEach(ReplyLanguage.allCases) { item in Text(item.label).tag(item) }
-                    }
-                    .labelsHidden()
-                }
-                control("Звук") {
-                    HStack(spacing: 14) {
-                        Toggle("Микрофон", isOn: $model.mic).disabled(model.recording)
-                        Toggle("Звук Mac", isOn: $model.system).disabled(model.recording)
-                        Spacer(minLength: 0)
-                        Toggle("Перевод на русский", isOn: $model.translate)
-                            .disabled(model.language == .ru)
-                    }
-                    .toggleStyle(.checkbox)
-                }
+                .labelsHidden()
             }
-            .disabled(model.busy)
-
-            if !model.recording {
-                ZStack(alignment: .topLeading) {
-                    TextEditor(text: $model.input)
-                        .scrollContentBackground(.hidden)
-                        .font(.system(size: 14))
-                        .padding(7)
-                        .disabled(model.busy)
-                        .accessibilityLabel("Вопрос или ответ кандидата")
-                    if model.input.isEmpty {
-                        Text(model.mode.placeholder)
-                            .font(.system(size: 14))
-                            .foregroundStyle(.secondary)
-                            .padding(.leading, 12)
-                            .padding(.top, 8)
-                            .allowsHitTesting(false)
-                            .accessibilityHidden(true)
-                    }
+            control("Длина") {
+                Picker("Длина ответа", selection: $model.length) {
+                    ForEach(ReplyLength.allCases) { item in Text(item.label).tag(item) }
                 }
-                .frame(minHeight: 69)
-                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
-                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary))
+                .labelsHidden()
+                .disabled(model.mode == .practice)
             }
-
-            HStack(spacing: 10) {
-                Button {
-                    model.toggleCapture()
-                } label: {
-                    Label(model.recording ? "Остановить" : "Слушать", systemImage: model.recording ? "stop.fill" : "mic")
+            control("Язык") {
+                Picker("Язык ответа", selection: $model.language) {
+                    ForEach(ReplyLanguage.allCases) { item in Text(item.label).tag(item) }
                 }
-                .disabled(!model.canToggleCapture)
-                .help(windowControls.listeningKey.map { "Прослушивание · \($0)" } ?? "Прослушивание")
-                Spacer(minLength: 4)
-                if !model.recording {
-                    Button { model.send() } label: {
-                        Text(model.mode == .practice ? "Новый вопрос" : "Отправить")
-                            .font(.callout.weight(.semibold))
-                            .padding(.horizontal, 13)
-                            .padding(.vertical, 7)
-                            .foregroundStyle(model.canSend ? Color.white : Color.secondary)
-                            .background(model.canSend ? accent : Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
-                    }
-                    .buttonStyle(.plain)
-                    .keyboardShortcut(.return, modifiers: [.command])
-                    .disabled(!model.canSend)
-                }
+                .labelsHidden()
             }
-            .controlSize(.large)
-
-            if !model.error.isEmpty || !model.status.isEmpty {
-                HStack(spacing: 6) {
-                    if model.busy { ProgressView().controlSize(.small) }
-                    Text(model.error.isEmpty ? model.status : model.error)
-                        .font(.callout)
-                        .foregroundStyle(model.error.isEmpty ? Color.secondary : Color(nsColor: .systemRed))
-                        .textSelection(.enabled)
+            control("Звук") {
+                HStack(spacing: 14) {
+                    Toggle("Микрофон", isOn: $model.mic).disabled(model.recording || model.busy)
+                    Toggle("Звук Mac", isOn: $model.system).disabled(model.recording || model.busy)
+                    Spacer(minLength: 2)
+                    Toggle("Русский перевод", isOn: $model.translate)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
-            }
-            if let shortcutStatus = windowControls.shortcutStatus {
-                Text(shortcutStatus).font(.callout).foregroundStyle(.secondary)
+                .toggleStyle(.checkbox)
             }
         }
-        .padding(.horizontal, 22)
-        .padding(.vertical, 16)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 13)
     }
 
     private func control<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
-        HStack(spacing: 10) {
-            Text(label)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .frame(width: 54, alignment: .leading)
+        HStack(spacing: 9) {
+            Text(label).font(.callout).foregroundStyle(.secondary).frame(width: 48, alignment: .leading)
             content()
         }
         .pickerStyle(.segmented)
     }
 
-    @ViewBuilder private var response: some View {
-        if model.recording || !model.liveChat.isEmpty || model.isReplying {
-            liveChatPane
-        } else {
-            writtenResponse
-        }
-    }
-
-    private var liveChatPane: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Чат")
-                .font(.headline)
-                .accessibilityAddTraits(.isHeader)
-            ScrollViewReader { scroll in
+    private var threadBar: some View {
+        HStack(spacing: 10) {
+            Button {
+                historyShown.toggle()
+            } label: {
+                Label("История", systemImage: "clock")
+            }
+            .disabled(model.archived.isEmpty)
+            .popover(isPresented: $historyShown, arrowEdge: .bottom) {
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 16) {
-                        ForEach(model.liveChat) { item in
-                            VStack(alignment: .leading, spacing: 10) {
-                                Text(item.text)
-                                    .font(.system(size: 15))
-                                    .textSelection(.enabled)
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(model.archived) { archived in
+                            Button {
+                                model.select(archived.id)
+                                historyShown = false
+                            } label: {
+                                Text(archived.title)
+                                    .lineLimit(2)
                                     .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(10)
-                                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
-                                if !item.segments.isEmpty {
-                                    VStack(alignment: .leading, spacing: 5) {
-                                        Text(title(for: item.mode))
-                                            .font(.caption.weight(.semibold))
-                                            .foregroundStyle(.secondary)
-                                        replyText(item.segments)
-                                    }
-                                    .padding(.horizontal, 10)
-                                }
+                                    .padding(.vertical, 7)
+                                    .padding(.horizontal, 9)
+                                    .contentShape(Rectangle())
                             }
+                            .buttonStyle(.plain)
+                            Divider().opacity(0.55)
                         }
-                        if !model.liveDraft.isEmpty {
-                            Text(model.liveDraft)
-                                .font(.system(size: 15))
-                                .foregroundStyle(.secondary)
-                                .italic()
-                                .padding(.horizontal, 10)
-                        }
-                        if model.isReplying {
-                            HStack(spacing: 7) {
-                                ProgressView().controlSize(.small)
-                                Text("Готовлю ответ…").foregroundStyle(.secondary)
-                            }
-                            .padding(.horizontal, 10)
-                        } else if model.liveChat.isEmpty && model.liveDraft.isEmpty {
-                            Text("Речь появится здесь.").foregroundStyle(.secondary)
-                        }
-                        Color.clear.frame(height: 1).id("live-bottom")
                     }
+                    .padding(8)
                 }
-                .onChange(of: model.liveDraft) { _, _ in scroll.scrollTo("live-bottom", anchor: .bottom) }
-                .onChange(of: model.liveChat.count) { _, _ in scroll.scrollTo("live-bottom", anchor: .bottom) }
-                .onChange(of: model.livePending) { _, _ in scroll.scrollTo("live-bottom", anchor: .bottom) }
+                .frame(width: 340, height: CGFloat(min(320, max(65, model.archived.count * 56))))
+            }
+            Spacer(minLength: 2)
+            if model.canRewrite {
+                Button("Обновить ответ") { model.rewriteAnswer() }
+                    .keyboardShortcut("r", modifiers: .command)
+                    .help("Ответ на тот же вопрос с выбранным языком и длиной")
+            }
+            if model.canClose {
+                Button("Закрыть вопрос") { model.closeQuestion() }
+                    .keyboardShortcut("n", modifiers: .command)
+                    .help("Свернуть вопрос в историю")
             }
         }
-        .padding(.horizontal, 22)
-        .padding(.vertical, 15)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 9)
         .background(Color(nsColor: .textBackgroundColor))
     }
 
-    private func replyText(_ segments: [Segment]) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(segment.text).font(.system(size: 15)).lineSpacing(3)
-                    if model.translate && !segment.ru.isEmpty {
-                        Text(segment.ru)
-                            .font(.system(size: 13).italic())
-                            .lineSpacing(2)
-                            .foregroundStyle(.secondary)
+    private var threadContent: some View {
+        ScrollViewReader { scroll in
+            ScrollView {
+                if let thread = model.activeThread {
+                    LazyVStack(alignment: .leading, spacing: 21) {
+                        ForEach(Array(thread.turns.enumerated()), id: \.element.id) { index, turn in
+                            turnView(turn, initial: index == 0)
+                                .id(turn.id)
+                        }
                     }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 9)
+                } else {
+                    Text(model.isReplying ? "Готовлю вопрос и ответ…" : "Напиши вопрос или нажми «Слушать».")
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, minHeight: 110)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .background(Color(nsColor: .textBackgroundColor))
+            .onChange(of: model.history.activeID) { _, _ in
+                if let first = model.activeThread?.turns.first { scroll.scrollTo(first.id, anchor: .top) }
+            }
+            .onChange(of: model.revision) { _, _ in
+                if let last = model.activeThread?.turns.last { scroll.scrollTo(last.id, anchor: .top) }
             }
         }
-        .padding(.trailing, 6)
+    }
+
+    private func turnView(_ turn: QuestionTurn, initial: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 11) {
+            if !initial { Divider() }
+            if let answer = turn.answer {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(turn.mode == .practice ? "Вопрос для репетиции" : initial ? "Вопрос" : "Уточнение")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    translatedLine(answer.question, weight: .semibold)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(11)
+                .background(accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+
+                if !answer.segments.isEmpty {
+                    Text(turn.mode == .review ? "Разбор" : "Ответ")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    ForEach(Array(answer.segments.enumerated()), id: \.offset) { index, line in
+                        HStack(alignment: .top, spacing: 10) {
+                            Text("\(index + 1).").monospacedDigit().font(.callout)
+                                .foregroundStyle(accent).frame(width: 22, alignment: .leading)
+                                .accessibilityHidden(true)
+                            translatedLine(line)
+                        }
+                    }
+                }
+            }
+        }
         .textSelection(.enabled)
     }
 
-    private var writtenResponse: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack {
-                Text(responseTitle)
-                    .font(.headline)
-                    .accessibilityAddTraits(.isHeader)
-                Spacer()
-                if !model.segments.isEmpty {
-                    Button {
-                        let text = model.segments.map { segment in
-                            !model.translate || segment.ru.isEmpty ? segment.text : "\(segment.text)\n\(segment.ru)"
-                        }.joined(separator: "\n\n")
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(text, forType: .string)
-                    } label: { Image(systemName: "doc.on.doc") }
-                    .accessibilityLabel("Скопировать ответ")
-                    .help("Скопировать ответ")
-                }
-            }
-            if model.segments.isEmpty {
-                Spacer()
-                Text("Здесь появится ответ.")
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity)
-                Spacer()
-            } else {
-                ScrollView {
-                    replyText(model.segments)
-                }
+    private func translatedLine(_ line: Segment, weight: Font.Weight = .regular) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(line.text).font(.system(size: 15, weight: weight)).lineSpacing(2)
+            if model.translate && !line.ru.isEmpty {
+                Text(line.ru).font(.system(size: 13).italic()).lineSpacing(2).foregroundStyle(.secondary)
             }
         }
-        .padding(.horizontal, 22)
-        .padding(.vertical, 15)
-        .background(Color(nsColor: .textBackgroundColor))
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var responseTitle: String {
-        title(for: model.responseMode ?? model.mode)
-    }
+    private var composer: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ZStack(alignment: .topLeading) {
+                TextEditor(text: $model.input)
+                    .scrollContentBackground(.hidden)
+                    .font(.system(size: 14))
+                    .padding(5)
+                    .accessibilityLabel(model.hasActive ? "Уточнение к открытому вопросу" : "Новый вопрос")
+                if model.input.isEmpty {
+                    Text(model.hasActive ? "Напиши уточнение к этому вопросу" : model.mode.placeholder)
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 10)
+                        .padding(.top, 6)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+            }
+            .frame(height: 52)
+            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
+            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(.quaternary))
 
-    private func title(for mode: TrainerMode) -> String {
-        switch mode {
-        case .answer: return "Ответ"
-        case .review: return "Разбор ответа"
-        case .practice: return "Вопрос"
+            HStack(spacing: 12) {
+                Button { model.toggleCapture() } label: {
+                    Label(model.recording ? "Остановить" : "Слушать", systemImage: model.recording ? "stop.fill" : "mic")
+                }
+                .disabled(!model.canToggleCapture)
+                .help(windowControls.listeningKey.map { "Прослушивание · \($0)" } ?? "Прослушивание")
+
+                if model.hasActive {
+                    Toggle("Уточнять голосом", isOn: $model.voiceFollowUp)
+                        .toggleStyle(.checkbox)
+                        .help("Добавлять продиктованные уточнения к открытому вопросу")
+                }
+                Spacer(minLength: 2)
+                Button(model.mode == .practice && model.input.isEmpty ? "Новый вопрос" : "Отправить") {
+                    model.send()
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.return, modifiers: .command)
+                .disabled(!model.canSend)
+            }
+
+            if !model.error.isEmpty || !model.status.isEmpty || model.isReplying {
+                HStack(spacing: 7) {
+                    if model.busy || model.isReplying { ProgressView().controlSize(.small) }
+                    Text(statusText)
+                        .font(.callout)
+                        .foregroundStyle(model.error.isEmpty ? Color.secondary : Color(nsColor: .systemRed))
+                    if model.retryAvailable { Button("Повторить") { model.retry() } }
+                }
+            }
+            if let warning = windowControls.shortcutStatus {
+                Text(warning).font(.callout).foregroundStyle(.secondary)
+            }
         }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+    }
+
+    private var statusText: String {
+        if !model.error.isEmpty { return model.error }
+        if model.pending > 1 { return "В очереди \(model.pending)" }
+        if model.isReplying { return "Готовлю ответ…" }
+        return model.status
     }
 }
 
@@ -343,7 +329,75 @@ struct Launcher {
             catch { print(error.localizedDescription); exit(1) }
             return
         }
+        if arguments.count == 3, arguments[1] == "--test-threads" {
+            do { try await testThreads(in: arguments[2]) }
+            catch { print(error.localizedDescription); exit(1) }
+            return
+        }
         UWCApp.main()
+    }
+
+    @MainActor private static func testThreads(in directory: String) async throws {
+        let store = LocalStore(root: URL(fileURLWithPath: directory))
+        let model = TrainerModel(persistPreferences: false, store: store, restoreHistory: false)
+        defer { model.gateway.shutdown() }
+        model.startLiveChat()
+        model.language = .uk
+        try model.ingestSpeech(SpeechEvent(message_type: "committed_transcript", text:
+            "The door is open, leave my coffee there. How would you decide where to spend a limited school budget? Отвечай на русском одну-две минуты, с примерами."))
+        try model.ingestSpeech(SpeechEvent(message_type: "committed_transcript", text:
+            "Проходите, ребята. Кто оставил кружку на столе? Отвечай на русском, спокойно."))
+        try model.ingestSpeech(SpeechEvent(message_type: "committed_transcript", text:
+            "Как можно помочь новому ученику освоиться в классе?"))
+        await model.finishLiveTest()
+
+        let threads = model.history.threads
+        guard threads.count == 2, let first = threads.first, let firstReply = first.turns.first?.answer,
+              first.title.localizedCaseInsensitiveContains("budget"),
+              !first.title.localizedCaseInsensitiveContains("coffee"),
+              !firstReply.question.ru.isEmpty,
+              NLLanguageRecognizer.dominantLanguage(for: firstReply.segments.map(\.text).joined(separator: " ")) == .ukrainian,
+              firstReply.segments.allSatisfy({ !$0.ru.isEmpty }),
+              threads.last?.title.contains("Как можно помочь новому ученику") == true,
+              model.activeThread?.id == threads.last?.id else {
+            throw TrainerError("Voice filtering, language or isolation check failed. \(model.error)")
+        }
+        print("Two independent voice questions. Background and spoken language directions ignored.")
+
+        model.closeQuestion()
+        guard model.activeThread == nil, model.archived.count == 2 else { throw TrainerError("Cannot archive active question.") }
+        model.select(first.id)
+        model.language = .en
+        model.input = "Can you give a simple example and say why this criterion is fair?"
+        model.send()
+        await model.finishLiveTest()
+        guard let reply = model.activeThread?.turns.last?.answer, model.activeThread?.turns.count == 2,
+              NLLanguageRecognizer.dominantLanguage(for: reply.segments.map(\.text).joined(separator: " ")) == .english,
+              model.history.threads.count == 2, model.error.isEmpty else {
+            throw TrainerError("Cannot append a follow-up to the reopened question. \(model.error)")
+        }
+
+        let followUpID = model.activeThread?.turns.last?.id
+        model.language = .ru
+        model.rewriteAnswer()
+        await model.finishLiveTest()
+        guard let turn = model.activeThread?.turns.last, turn.id == followUpID,
+              turn.variants.count == 2, turn.answer?.choice.language == .ru,
+              turn.answer?.segments.allSatisfy({ $0.ru.isEmpty }) == true else {
+            throw TrainerError("The Russian variant did not replace the visible answer. \(model.error)")
+        }
+        model.language = .en
+        model.rewriteAnswer()
+        guard model.pending == 0, model.activeThread?.turns.last?.answer?.choice.language == .en else {
+            throw TrainerError("The previous language variant was not restored from cache.")
+        }
+        model.input = "Unsent follow-up"
+        model.closeQuestion()
+        guard model.input.isEmpty, model.activeThread == nil else { throw TrainerError("Draft leaked to a new question.") }
+        model.select(first.id)
+        guard model.input == "Unsent follow-up", store.history.activeID == first.id,
+              store.history.threads.count == 2 else { throw TrainerError("Thread restoration failed.") }
+        print("Archived and reopened, added a contextual follow-up, switched language, restored cached variant and saved history.")
     }
 
     @MainActor private static func testLive(takes: [String], directory: String) async throws {
@@ -403,18 +457,13 @@ struct Launcher {
         stream.close()
         let partials = try await reader.value
         await model.finishLiveTest()
-        let userCount = model.liveChat.count
-        let answerCount = model.liveChat.filter { !$0.segments.isEmpty }.count
+        let count = model.history.threads.count
         let expected = Int(ProcessInfo.processInfo.environment["UWC_TEST_EXPECTED_TURNS"] ?? "") ?? takes.count
-        guard partials > 0, userCount == expected, answerCount == expected, model.error.isEmpty else {
-            throw TrainerError("Unexpected live result: \(partials) partials, \(userCount) turns, \(answerCount) answers. \(model.error)")
+        guard partials > 0, count == expected, model.error.isEmpty else {
+            throw TrainerError("Unexpected live result: \(partials) partials, \(count) threads. \(model.error)")
         }
-        print("Live: \(partials) partials, \(userCount) turns, \(answerCount) automatic answers")
-        let changed = await gateway.isNewTopic(TurnBoundary(spoken: "How should we welcome a new student?", opening: "What do you think about taxing carbon emissions"))
-        let continued = await gateway.isNewTopic(TurnBoundary(spoken: "How should we welcome a new student?", opening: "For example, during the first lunch break"))
-        guard changed && !continued else { throw TrainerError("Turn boundary test failed.") }
-        print("Topic change separated; example joined.")
-        guard store.history.count == expected else { throw TrainerError("History was not saved.") }
+        guard store.history.threads.count == expected else { throw TrainerError("History was not saved.") }
+        print("Live: \(partials) interim events, \(count) separate question threads")
         if let path = ProcessInfo.processInfo.environment["UWC_TEST_PREVIEW"] {
             model.recording = true
             model.status = "Слушаю. Ответ появится автоматически."
@@ -423,13 +472,27 @@ struct Launcher {
     }
 
     @MainActor private static func renderPreview(to path: String) throws {
-        let model = TrainerModel(persistPreferences: false, restoreHistory: false)
-        model.language = .en
-        model.input = "How can a team make a fair decision when time is limited?"
-        model.segments = [
-            Segment(text: "I would ask the group to agree on one clear criterion first.", ru: "Я бы предложил группе сначала согласовать один понятный критерий."),
-            Segment(text: "Then we could hear one point from each person and choose the option that meets it best.", ru: "Затем можно выслушать по одному аргументу от каждого и выбрать вариант, который лучше всего подходит.")
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = LocalStore(root: directory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let choice = AnswerChoice(language: .en, length: .short)
+        let question = Segment(text: "How should a team make a fair decision when time is limited?",
+                               ru: "Как команде принять справедливое решение, если времени мало?")
+        let segments = [
+            Segment(text: "I would start by asking the group to agree on one clear criterion.",
+                    ru: "Я бы сначала предложил группе выбрать один понятный критерий."),
+            Segment(text: "For example, we could compare which idea helps the most students this week.",
+                    ru: "Например, можно сравнить, какая идея поможет большему числу учеников на этой неделе."),
+            Segment(text: "This gives everyone a fair way to explain their choice.",
+                    ru: "Так у каждого будет возможность объяснить свой выбор."),
         ]
+        let answer = AnswerVariant(choice: choice, question: question, segments: segments)
+        let earlier = AnswerVariant(choice: choice, question: Segment(text: "How can we help a new student?", ru: ""), segments: [])
+        let thread = QuestionThread(id: UUID(), turns: [QuestionTurn(mode: .answer, variants: [answer], displayed: choice)])
+        let archived = QuestionThread(id: UUID(), turns: [QuestionTurn(mode: .answer, variants: [earlier], displayed: choice)])
+        try store.saveHistory(ThreadHistory(threads: [archived, thread], activeID: thread.id))
+        let model = TrainerModel(persistPreferences: false, store: store)
+        model.language = .en
         try render(model: model, to: path)
     }
 

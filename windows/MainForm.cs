@@ -7,7 +7,7 @@ internal sealed class MainForm : Form
     private readonly Storage storage;
     private readonly Gateway gateway = new();
     private readonly CancellationTokenSource lifetime = new();
-    private readonly List<ChatTurn> history;
+    private readonly QuestionBook book;
     private readonly ToolTip tooltips = new();
     private readonly ComboBox mode = Choices("Ответ", "Разбор", "Тренировка");
     private readonly ComboBox length = Choices("Кратко", "Средне", "Подробно");
@@ -18,18 +18,27 @@ internal sealed class MainForm : Form
     private readonly CheckBox ghost = Toggle("Ghost", true);
     private readonly TextBox input = new() { Multiline = true, Dock = DockStyle.Fill, ScrollBars = ScrollBars.Vertical, PlaceholderText = "Вопрос или ответ для тренировки" };
     private readonly RichTextBox chat = new() { ReadOnly = true, DetectUrls = false, BackColor = SystemColors.Window, Dock = DockStyle.Fill };
-    private readonly Label draft = new() { AutoSize = true, Dock = DockStyle.Fill, ForeColor = SystemColors.GrayText, Padding = new(4) };
     private readonly Label status = new() { AutoSize = true, Dock = DockStyle.Fill, ForeColor = SystemColors.GrayText };
     private readonly Button listen = new() { Text = "Слушать", AutoSize = true };
     private readonly Button send = new() { Text = "Отправить", AutoSize = true };
     private readonly Button settingsButton = new() { Text = "Настройки", AutoSize = true };
-    private LiveTurns turns = new();
+    private sealed record Work(string Text, Guid? Target, Guid Navigation, string Mode, AnswerChoice Choice, string Source,
+        Guid? Session = null, QuestionTurn? Rewrite = null);
+
+    private readonly CheckBox voiceFollowUp = Toggle("Уточнять голосом", false);
+    private readonly Button archive = new() { Text = "История", AutoSize = true };
+    private readonly Button closeQuestion = new() { Text = "Закрыть вопрос", AutoSize = true };
+    private readonly Button rewrite = new() { Text = "Обновить ответ", AutoSize = true };
+    private readonly Button retry = new() { Text = "Повторить", AutoSize = true, Visible = false };
+    private readonly ContextMenuStrip archiveMenu = new();
+    private readonly Dictionary<Guid, string> drafts = [];
+    private readonly HashSet<Guid> rewriting = [];
     private CancellationTokenSource? capture;
-    private CancellationTokenSource? checking;
-    private Task commitQueue = Task.CompletedTask;
     private Task replyQueue = Task.CompletedTask;
+    private Guid voiceSession;
+    private (string Text, Guid Session, Guid? Target, Guid Navigation, DateTimeOffset Time)? incomplete;
+    private Work? failed;
     private int pending;
-    private string lastQuestion = "";
     private string? listenShortcut;
     private string? windowShortcut;
     private bool settingsOpen;
@@ -49,15 +58,22 @@ internal sealed class MainForm : Form
         ClientSize = new(710, 650);
         AutoScaleMode = AutoScaleMode.Dpi;
         Font = new("Segoe UI", 10);
-        translationFont = new Font(Font, FontStyle.Italic);
+        translationFont = new Font(Font.FontFamily, Font.Size - 1, FontStyle.Italic);
         questionFont = new Font(Font, FontStyle.Bold);
         Icon = SystemIcons.Application;
-        try { history = storage.ReadHistory(); }
-        catch (Exception ex) when (ex is IOException or System.Text.Json.JsonException) { history = []; }
+        try { book = new QuestionBook(storage.ReadThreads()); }
+        catch (Exception ex) when (ex is IOException or System.Text.Json.JsonException) { book = new QuestionBook(new([], null)); }
         BuildLayout();
         DrawChat();
         listen.Click += async (_, _) => await ToggleCapture();
         send.Click += (_, _) => SendTyped();
+        archive.Click += (_, _) => ShowHistory();
+        closeQuestion.Click += (_, _) => Navigate(null);
+        rewrite.Click += (_, _) => RewriteAnswer();
+        retry.Click += (_, _) => { if (failed is { } request) Enqueue(request); };
+        length.SelectedIndexChanged += (_, _) => RefreshControls();
+        tooltips.SetToolTip(closeQuestion, "Ctrl+N");
+        tooltips.SetToolTip(rewrite, "Ctrl+R");
         settingsButton.Click += (_, _) => OpenSettings();
         ghost.CheckedChanged += (_, _) => ApplyGhost();
         translation.CheckedChanged += (_, _) => DrawChat();
@@ -78,12 +94,9 @@ internal sealed class MainForm : Form
     private void BuildLayout()
     {
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new(14), ColumnCount = 1, RowCount = 8 };
-        layout.RowStyles.Add(new(SizeType.AutoSize));
-        layout.RowStyles.Add(new(SizeType.AutoSize));
-        layout.RowStyles.Add(new(SizeType.AutoSize));
-        layout.RowStyles.Add(new(SizeType.Absolute, 68));
-        layout.RowStyles.Add(new(SizeType.AutoSize));
+        for (var row = 0; row < 4; row++) layout.RowStyles.Add(new(SizeType.AutoSize));
         layout.RowStyles.Add(new(SizeType.Percent, 100));
+        layout.RowStyles.Add(new(SizeType.Absolute, 60));
         layout.RowStyles.Add(new(SizeType.AutoSize));
         layout.RowStyles.Add(new(SizeType.AutoSize));
         var header = new TableLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, ColumnCount = 3 };
@@ -104,12 +117,11 @@ internal sealed class MainForm : Form
         selectors.Controls.Add(language, 2, 1);
         layout.Controls.Add(selectors, 0, 1);
         layout.Controls.Add(Row(microphone, system, translation), 0, 2);
-        layout.Controls.Add(input, 0, 3);
-        layout.Controls.Add(Row(listen, send), 0, 4);
-        layout.Controls.Add(chat, 0, 5);
-        layout.Controls.Add(draft, 0, 6);
-        layout.Controls.Add(status, 0, 7);
-        layout.SizeChanged += (_, _) => draft.MaximumSize = new(Math.Max(160, layout.ClientSize.Width - layout.Padding.Horizontal), 0);
+        layout.Controls.Add(Row(archive, closeQuestion, rewrite), 0, 3);
+        layout.Controls.Add(chat, 0, 4);
+        layout.Controls.Add(input, 0, 5);
+        layout.Controls.Add(Row(listen, voiceFollowUp, send), 0, 6);
+        layout.Controls.Add(Row(status, retry), 0, 7);
         Controls.Add(layout);
     }
 
@@ -178,6 +190,16 @@ internal sealed class MainForm : Form
             SendTyped();
             return true;
         }
+        if (keyData == (Keys.Control | Keys.N))
+        {
+            Navigate(null);
+            return true;
+        }
+        if (keyData == (Keys.Control | Keys.R))
+        {
+            RewriteAnswer();
+            return true;
+        }
         return base.ProcessCmdKey(ref msg, keyData);
     }
 
@@ -220,13 +242,13 @@ internal sealed class MainForm : Form
             active.Cancel();
             return;
         }
-        if (settingsOpen || pending > 0 || (!microphone.Checked && !system.Checked)) return;
+        if (settingsOpen || (!microphone.Checked && !system.Checked)) return;
         var stop = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
         var selectedMic = microphone.Checked;
         var selectedSystem = system.Checked;
         string? deviceError = null;
         capture = stop;
-        turns = new();
+        voiceSession = Guid.NewGuid();
         SetStatus("Подключаю звук…");
         RefreshControls();
         try
@@ -257,10 +279,6 @@ internal sealed class MainForm : Form
         catch (Exception error) { SetStatus(error.Message); }
         finally
         {
-            checking?.Cancel();
-            checking = null;
-            if (turns.Draft.Length > 0) input.AppendText((input.TextLength > 0 ? Environment.NewLine : "") + turns.Draft);
-            draft.Text = "";
             capture = null;
             stop.Dispose();
             RefreshControls();
@@ -281,19 +299,13 @@ internal sealed class MainForm : Form
             switch (message.Type)
             {
                 case "partial_transcript" when message.Text.Length > 0:
-                    turns.Update(message.Text);
-                    draft.Text = turns.Draft;
-                    _ = CheckBoundary(cancellation);
+                    SetStatus("Слышу речь…");
                     break;
-                case "committed_transcript" when message.Text.Length > 0:
-                    var interrupted = checking is not null;
-                    checking?.Cancel();
-                    checking = null;
-                    turns.Update(message.Text);
-                    var suggestion = turns.Candidate;
-                    if (!interrupted && suggestion == turns.Checked) suggestion = null;
-                    Commit(turns.Finish(message.Text), suggestion);
-                    draft.Text = "";
+                case "committed_transcript" when message.Text.Any(char.IsLetter):
+                    var reviewExercise = SelectedMode == "practice" && book.Active?.Turns.FirstOrDefault()?.Mode == "practice";
+                    var target = voiceFollowUp.Checked || reviewExercise ? book.ActiveId : null;
+                    var task = SelectedMode == "practice" ? "review" : SelectedMode;
+                    Enqueue(new(message.Text, target, book.Navigation, task, SelectedChoice, "voice", voiceSession));
                     break;
                 case "session_started" or "warning" or "partial_transcript" or "committed_transcript" or "committed_transcript_with_timestamps":
                     break;
@@ -303,76 +315,71 @@ internal sealed class MainForm : Form
         }
     }
 
-    private async Task CheckBoundary(CancellationToken cancellation)
+    private void Navigate(Guid? id)
     {
-        if (checking is not null || turns.Candidate is not { } candidate || turns.Checked?.Spoken == candidate.Spoken) return;
-        using var request = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-        checking = request;
-        turns.Checked = candidate;
-        var separate = await gateway.IsNewTopic(candidate, request.Token);
-        if (!ReferenceEquals(checking, request)) return;
-        checking = null;
-        if (!request.IsCancellationRequested && separate && turns.SplitAt(candidate) is { } text)
-        {
-            Commit(text, null);
-            draft.Text = turns.Draft;
-        }
-    }
-
-    private void Commit(string text, Boundary? boundary)
-    {
-        if (!text.Any(char.IsLetter)) return;
-        var selection = SelectedMode == "practice" ? "review" : SelectedMode;
-        pending++;
+        drafts[book.ActiveId ?? Guid.Empty] = input.Text;
+        book.Select(id);
+        voiceFollowUp.Checked = false;
+        input.Text = drafts.GetValueOrDefault(id ?? Guid.Empty, "");
+        SaveHistory();
+        DrawChat();
         RefreshControls();
-        commitQueue = FinishTurn(commitQueue, text, boundary, selection);
     }
 
-    private async Task FinishTurn(Task prior, string text, Boundary? boundary, string selectedMode)
+    private void ShowHistory()
     {
-        try
+        archiveMenu.Items.Clear();
+        foreach (var thread in book.Threads.AsEnumerable().Reverse().Where(thread => thread.Id != book.ActiveId))
         {
-            await prior;
-            if (boundary is not null && await gateway.IsNewTopic(boundary, lifetime.Token))
-            {
-                QueueAnswer(boundary.Spoken, selectedMode);
-                QueueAnswer(boundary.Opening, selectedMode);
-            }
-            else QueueAnswer(text, selectedMode);
+            var title = thread.Title.Replace("&", "&&", StringComparison.Ordinal).ReplaceLineEndings(" ");
+            if (title.Length > 88) title = title[..88] + "…";
+            archiveMenu.Items.Add(title, null, (_, _) => Navigate(thread.Id));
         }
-        finally
-        {
-            pending--;
-            RefreshControls();
-        }
+        if (archiveMenu.Items.Count > 0) archiveMenu.Show(archive, new Point(0, archive.Height));
     }
 
     private void SendTyped()
     {
         if (!send.Enabled) return;
         var text = input.Text.Trim();
-        if (text.Length == 0) text = "Следующий тренировочный вопрос";
         input.Clear();
-        QueueAnswer(text, SelectedMode);
+        if (text.Length == 0 && SelectedMode == "practice") Navigate(null);
+        if (book.ActiveId is null) book.Select(Guid.NewGuid());
+        Enqueue(new(text.Length > 0 ? text : "Задай новый вопрос для репетиции UWC.",
+            book.ActiveId, book.Navigation, SelectedMode, SelectedChoice, "typed"));
     }
 
     private string SelectedMode => new[] { "answer", "review", "practice" }[mode.SelectedIndex];
-    private string SelectedLanguage => new[] { "ru", "uk", "en" }[language.SelectedIndex];
+    private AnswerChoice SelectedChoice => new(new[] { "ru", "uk", "en" }[language.SelectedIndex],
+        new[] { "short", "medium", "long" }[length.SelectedIndex]);
 
-    private void QueueAnswer(string text, string selectedMode)
+    private void RewriteAnswer()
     {
-        var question = new ChatTurn(Guid.NewGuid(), text, selectedMode, []);
-        history.Add(question);
-        SaveHistory();
-        DrawChat();
-        var request = new CoachRequest("", text, selectedMode, SelectedLanguage,
-            new[] { "short", "medium", "long" }[length.SelectedIndex], translation.Checked && SelectedLanguage != "ru");
-        pending++;
-        RefreshControls();
-        replyQueue = AnswerAfter(replyQueue, question, request);
+        if (!rewrite.Enabled || book.Active is not { } thread ||
+            thread.Turns.LastOrDefault() is not { } turn || turn.Answer is not { } answer) return;
+        if (turn.Variants.Exists(variant => variant.Choice == SelectedChoice))
+        {
+            book.ShowVariant(thread.Id, turn.Id, SelectedChoice, null);
+            SaveHistory();
+            DrawChat(toLast: true);
+            RefreshControls();
+            return;
+        }
+        Enqueue(new(answer.Question.Text, thread.Id, book.Navigation, turn.Mode, SelectedChoice, "rewrite", Rewrite: turn));
     }
 
-    private async Task AnswerAfter(Task prior, ChatTurn turn, CoachRequest request)
+    private void Enqueue(Work request)
+    {
+        failed = null;
+        retry.Visible = false;
+        if (request.Rewrite is { } turn) rewriting.Add(turn.Id);
+        pending++;
+        SetStatus(pending > 1 ? $"В очереди {pending}" : "Готовлю ответ…");
+        RefreshControls();
+        replyQueue = DeliverAfter(replyQueue, request);
+    }
+
+    private async Task DeliverAfter(Task prior, Work request)
     {
         try
         {
@@ -381,58 +388,100 @@ internal sealed class MainForm : Form
             var settings = Credentials();
             await gateway.EnsureReady(settings);
             var profile = await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, "CoachPrompt.txt"), lifetime.Token);
-            var utterance = request.Input;
-            if (lastQuestion.Length > 0 && request.Mode == "review")
-                utterance = $"Последний тренировочный вопрос: {lastQuestion}\n\nОтвет кандидата: {utterance}";
-            if (lastQuestion.Length > 0 && request.Mode == "practice")
-                utterance += $"\nНе повторяй прошлый вопрос: {lastQuestion}";
-            var reply = await gateway.Answer(request with { Prompt = profile + "\n\n" + settings.Profile, Input = utterance }, lifetime.Token);
-            if (reply.Length == 0) throw new InvalidOperationException("Gemini вернул пустой ответ.");
-            if (request.Mode == "practice") lastQuestion = string.Join(" ", reply.Select(segment => segment.Text));
-            var index = history.FindIndex(item => item.Id == turn.Id);
-            if (index >= 0) history[index] = turn with { Reply = reply };
+            var previous = request.Rewrite?.Answer?.Segments ?? [];
+            var carry = "";
+            if (request.Session is { } session && incomplete is { } fragment && fragment.Session == session &&
+                fragment.Target == request.Target && fragment.Navigation == request.Navigation &&
+                DateTimeOffset.UtcNow - fragment.Time < TimeSpan.FromSeconds(15)) carry = fragment.Text;
+            var response = await gateway.Answer(new ThreadRequest(profile + "\n\n" + settings.Profile, request.Text,
+                request.Mode, request.Choice.Language, request.Choice.Length, request.Choice.Language != "ru", request.Source,
+                book.Context(request.Target, request.Rewrite?.Id), string.Join(" ", previous.Select(line => line.Text)), carry), lifetime.Token);
+
+            if (request.Session is { } incoming)
+            {
+                var combined = carry + " " + request.Text;
+                incomplete = response.Incomplete
+                    ? (combined.Length > 1200 ? combined[^1200..] : combined, incoming, request.Target, request.Navigation, DateTimeOffset.UtcNow)
+                    : null;
+            }
+            if (request.Rewrite is { } turn && request.Target is { } thread && response.Items.FirstOrDefault() is { } replacement)
+            {
+                var question = request.Mode == "practice" ? replacement.Question : turn.Answer?.Question ?? replacement.Question;
+                book.ShowVariant(thread, turn.Id, request.Choice, new AnswerVariant(request.Choice, question, replacement.Segments));
+            }
+            else
+            {
+                foreach (var item in response.Items)
+                    book.Add(item, request.Target, request.Navigation, request.Mode, request.Choice,
+                        input.TextLength == 0 && !voiceFollowUp.Checked);
+            }
+
+            SetStatus(pending > 1 ? $"В очереди {pending - 1}" : capture is not null ? "Слушаю…" : "");
+            if (response.Items.Length == 0) return;
             SaveHistory();
-            DrawChat();
-            SetStatus(capture is not null ? "Слушаю…" : "Ответ готов.");
+            if (request.Target == book.ActiveId || request.Target is null && request.Navigation == book.Navigation)
+                DrawChat(toLast: true);
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
-        catch (Exception error) { SetStatus(error.Message); }
+        catch (Exception error)
+        {
+            if (IsDisposed || lifetime.IsCancellationRequested) return;
+            failed = request;
+            retry.Visible = true;
+            SetStatus(error.Message);
+        }
         finally
         {
             pending--;
+            if (request.Rewrite is { } turn) rewriting.Remove(turn.Id);
             RefreshControls();
         }
     }
 
-    private Settings Credentials()
-    {
-        var value = storage.ReadSettings();
-        return value.Configured ? value : throw new InvalidOperationException("Добавь ключи Gemini и ElevenLabs в настройках.");
-    }
-
     private void SaveHistory()
     {
-        try { storage.WriteHistory(history); }
+        try { storage.WriteThreads(book.Snapshot()); }
         catch { SetStatus("Не удалось сохранить локальную историю."); }
     }
 
-    private void DrawChat()
+    private void DrawChat(bool toLast = false)
     {
         chat.SuspendLayout();
         chat.Clear();
-        foreach (var turn in history.TakeLast(100))
+        int lastPosition = 0;
+        if (book.Active is { } thread)
         {
-            ChatLine(turn.Input + "\n", questionFont, SystemColors.WindowText);
-            foreach (var row in turn.Reply)
+            foreach (var turn in thread.Turns)
             {
-                ChatLine(row.Text + "\n", Font, SystemColors.WindowText);
-                if (translation.Checked && row.Ru.Length > 0) ChatLine(row.Ru + "\n", translationFont, SystemColors.GrayText);
+                lastPosition = chat.TextLength;
+                if (turn.Answer is not { } reply) continue;
+                ChatLine(turn.Mode == "practice" ? "Вопрос для репетиции\n" :
+                    turn == thread.Turns[0] ? "Вопрос\n" : "Уточнение\n", Font, SystemColors.GrayText);
+                ChatLine(reply.Question.Text + "\n", questionFont, SystemColors.WindowText);
+                DrawTranslation(reply.Question);
+                if (reply.Segments.Length > 0)
+                {
+                    ChatLine(turn.Mode == "review" ? "\nРазбор\n" : "\nОтвет\n", Font, SystemColors.GrayText);
+                    for (var index = 0; index < reply.Segments.Length; index++)
+                    {
+                        var line = reply.Segments[index];
+                        ChatLine($"{index + 1}. {line.Text}\n", Font, SystemColors.WindowText);
+                        DrawTranslation(line);
+                        chat.AppendText("\n");
+                    }
+                }
+                chat.AppendText("\n");
             }
-            chat.AppendText("\n");
         }
-        chat.SelectionStart = chat.TextLength;
+        else ChatLine("Напиши вопрос или нажми «Слушать».", Font, SystemColors.GrayText);
+        chat.SelectionStart = toLast ? lastPosition : 0;
         chat.ScrollToCaret();
         chat.ResumeLayout();
+    }
+
+    private void DrawTranslation(Segment line)
+    {
+        if (translation.Checked && line.Ru.Length > 0) ChatLine(line.Ru + "\n", translationFont, SystemColors.GrayText);
     }
 
     private void ChatLine(string value, Font font, Color color)
@@ -450,13 +499,24 @@ internal sealed class MainForm : Form
         var recording = capture is not null;
         microphone.Enabled = system.Enabled = !recording;
         settingsButton.Enabled = !recording && pending == 0;
-        listen.Enabled = recording || (pending == 0 && (microphone.Checked || system.Checked));
+        listen.Enabled = recording || microphone.Checked || system.Checked;
         listen.Text = recording ? "Остановить" : "Слушать";
-        input.Enabled = !recording;
-        send.Text = SelectedMode == "practice" ? "Новый вопрос" : "Отправить";
-        send.Enabled = !recording && pending == 0 && (SelectedMode == "practice" || !string.IsNullOrWhiteSpace(input.Text));
+        send.Text = SelectedMode == "practice" && input.TextLength == 0 ? "Новый вопрос" : "Отправить";
+        send.Enabled = SelectedMode == "practice" || !string.IsNullOrWhiteSpace(input.Text);
         length.Enabled = SelectedMode != "practice";
-        translation.Enabled = SelectedLanguage != "ru";
+        voiceFollowUp.Visible = book.Active is not null;
+        input.PlaceholderText = book.Active is null ? "Напиши вопрос" : "Напиши уточнение к этому вопросу";
+        closeQuestion.Enabled = book.ActiveId is not null;
+        archive.Enabled = book.Threads.Any(thread => thread.Id != book.ActiveId);
+        var turn = book.Active?.Turns.LastOrDefault();
+        rewrite.Visible = turn is not null && turn.Displayed != SelectedChoice;
+        rewrite.Enabled = turn is not null && turn.Displayed != SelectedChoice && !rewriting.Contains(turn.Id);
+    }
+
+    private Settings Credentials()
+    {
+        var value = storage.ReadSettings();
+        return value.Configured ? value : throw new InvalidOperationException("Добавь ключи Gemini и ElevenLabs в настройках.");
     }
 
     private void SetStatus(string value)
@@ -471,6 +531,7 @@ internal sealed class MainForm : Form
         translationFont.Dispose();
         questionFont.Dispose();
         tooltips.Dispose();
+        archiveMenu.Dispose();
         base.OnFormClosed(e);
     }
 }

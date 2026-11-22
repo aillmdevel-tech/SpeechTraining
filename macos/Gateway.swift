@@ -88,28 +88,20 @@ final class Gateway {
         throw TrainerError(problem ?? "Gemini не обработал запрос.")
     }
 
-    func isNewTopic(_ boundary: TurnBoundary) async -> Bool {
-        struct Decision: Decodable { let separate: Bool }
-        let request = ["spoken": String(boundary.spoken.suffix(2000)), "opening": String(boundary.opening.prefix(650))]
-        guard let body = try? JSONEncoder().encode(request),
-              let data = try? await post("/boundary", body: body),
-              let decision = try? JSONDecoder().decode(Decision.self, from: data) else { return false }
-        return decision.separate
-    }
-
-    func answer(input: String, mode: TrainerMode, language: ReplyLanguage, length: ReplyLength, translate: Bool) async throws -> [Segment] {
+    func answer(input: String, mode: TrainerMode, choice: AnswerChoice, source: String,
+                history: [PriorReply], previous: String, continuation: String) async throws -> ThreadReply {
         guard let promptURL = Bundle.main.url(forResource: "CoachPrompt", withExtension: "txt") else {
             throw TrainerError("Профиль тренировки отсутствует.")
         }
         let defaultPrompt = try String(contentsOf: promptURL, encoding: .utf8)
         let extra = store.settings.profile
+        let prior = history.map { ["question": $0.question, "answer": $0.answer] }
         let settings: [String: Any] = [
             "input": input, "prompt": defaultPrompt + "\n\n" + extra, "mode": mode.rawValue,
-            "language": language.rawValue, "length": length.rawValue, "translate": translate && language != .ru,
+            "language": choice.language.rawValue, "length": choice.length.rawValue, "translate": choice.language != .ru,
+            "source": source, "history": prior, "previous": previous, "continuation": continuation,
         ]
-        let data = try await post("/answer", body: JSONSerialization.data(withJSONObject: settings))
-        let segments = try JSONDecoder().decode(CoachReply.self, from: data).segments.filter { !$0.text.isEmpty }
-        guard !segments.isEmpty else { throw TrainerError("Gemini вернул пустой ответ.") }
-        return segments.map { Segment(text: $0.text, ru: translate && language != .ru ? $0.ru : "") }
+        let data = try await post("/thread", body: JSONSerialization.data(withJSONObject: settings))
+        return try JSONDecoder().decode(ThreadReply.self, from: data)
     }
 }

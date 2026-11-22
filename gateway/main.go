@@ -301,6 +301,7 @@ func serve(keys cloudConfig, stdin io.Reader) error {
 	}
 	token := hex.EncodeToString(secret[:])
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /thread", threadHandler(keys.Gemini))
 	mux.HandleFunc("POST /answer", func(w http.ResponseWriter, r *http.Request) {
 		var request coachRequest
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10)).Decode(&request); err != nil || strings.TrimSpace(request.Input) == "" {
